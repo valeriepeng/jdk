@@ -26,6 +26,8 @@ package javax.crypto.spec;
 
 import java.nio.charset.Charset;
 import java.security.spec.AlgorithmParameterSpec;
+import java.util.Arrays;
+import javax.security.auth.Destroyable;
 import sun.security.util.Debug;
 import sun.security.util.KeyUtil;
 import sun.security.util.PBEUtil;
@@ -45,7 +47,8 @@ import sun.security.util.PBEUtil;
  *
  * @since 27
  */
-public final class Argon2ParameterSpec implements AlgorithmParameterSpec {
+public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
+        Destroyable {
 
     /**
      * Version of Argon2 implementations
@@ -271,6 +274,9 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec {
          */
         public Builder secret(byte[] k) throws IllegalArgumentException {
             checkNonNull(k, "secret");
+            if (this.k != B0) {
+                Arrays.fill(k, (byte) 0);
+            }
             this.k = (k.length > 0 ? k.clone() : B0);
             return this;
         }
@@ -396,6 +402,9 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec {
      * {@return the message bytes}
      */
     public byte[] msg() {
+        if (msg == null) {
+            throw new IllegalStateException("msg has been cleared");
+        }
         return msg.clone();
     }
 
@@ -439,6 +448,9 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec {
      * {@return the optional secret value, byte[0] if not used}
      */
     public byte[] secret() {
+        if (k == null) {
+            throw new IllegalStateException("secret has been cleared");
+        }
         return (k.length == 0 ? B0 : k.clone());
     }
 
@@ -453,16 +465,31 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec {
      * {@return a String representation of the parameter set}
      */
     public String toString() {
-        String s = String.format("%s nonce=%s parallelism=%d tagLen=%d memory=%d iterations=%d",
-                ver.name(), Debug.toString(nonce), p, tagLen, memory, t);
-        // skip msg, secret, and ad due to their potential sensitivity
+        String s = String.format("%s nonce=%s parallelism=%d tagLen=%d memory=%d iterations=%d, ad=%s",
+                ver.name(), Debug.toString(nonce), p, tagLen, memory,
+                t, Debug.toString(x));
+        // skip msg and secret due to their potential sensitivity
         return s;
     }
 
     /**
-     * Clear out the {@code msg}, {@code secret}, and {@code ad} fields.
+     * Destroy this object by clearing out the {@code msg} and {@code secret}
+     * fields.
      */
-    public void clear() {
-        KeyUtil.clear(msg, k, x);
+    @Override
+    public void destroy() {
+        KeyUtil.clear(msg, k);
+        msg = null;
+        k = null;
     }
+
+    /**
+     * @return {@code true} if this {@code Object} has been destroyed,
+     * {@code false} otherwise.
+     */
+    @Override
+    public boolean isDestroyed() {
+        return (msg == null && k == null);
+    }
+
 }
