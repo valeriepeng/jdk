@@ -58,7 +58,7 @@ public class InvalidArgs {
                 iaeCls);
         Utils.runAndCheckException(()->b.iterations(0), iaeCls);
         Utils.runAndCheckException(()->b.secret(null), iaeCls);
-        Utils.runAndCheckException(()->b.ad(null), iaeCls);
+        Utils.runAndCheckException(()->b.associatedData(null), iaeCls);
 
         final byte[] b8 = "12345678".getBytes();
         final char[] c0 = new char[0];

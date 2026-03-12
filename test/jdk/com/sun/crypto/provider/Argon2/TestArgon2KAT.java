@@ -48,7 +48,7 @@ public class TestArgon2KAT {
         return res;
     }
 
-    private static Argon2ParameterSpec genParams(byte[] msg,
+    private static Argon2ParameterSpec genParams(byte[] passwd,
             byte[] salt, int parallelism, int memory, int iteration,
             byte[] secret, byte[] ad, int tagLen) {
         Builder b = Argon2ParameterSpec.newBuilder().parallelism(parallelism)
@@ -57,9 +57,9 @@ public class TestArgon2KAT {
             b = b.secret(secret);
         }
         if (ad != null && ad.length > 0) {
-            b = b.ad(ad);
+            b = b.associatedData(ad);
         }
-        return b.build(salt, msg);
+        return b.build(salt, passwd);
     }
 
     private static void checkOutputs(String expectedHex, byte[]... res) {
@@ -100,7 +100,7 @@ public class TestArgon2KAT {
     }
 
     // Argon2id only
-    private static void runPHC(String expected, byte[] msg)
+    private static void runPHC(String expected, byte[] passwd)
             throws Exception {
         System.out.println("test against: " + expected);
         Argon2Info info = Argon2Util.decodeHash(expected);
@@ -109,7 +109,7 @@ public class TestArgon2KAT {
         if (!algo.equals("ARGON2ID")) {
             throw new RuntimeException("Only supports Argon2id: " + algo);
         }
-        Argon2ParameterSpec spec = info.builder().build(info.salt(), msg);
+        Argon2ParameterSpec spec = info.builder().build(info.salt(), passwd);
         byte[] out = KDF.getInstance(algo).deriveData(spec);
         String actual = Argon2Util.encodeHash(algo, spec, out);
         if (!actual.equalsIgnoreCase(expected)) {
@@ -190,7 +190,7 @@ public class TestArgon2KAT {
     }
 
     private static void selfTest2() throws Exception {
-        byte[] msg = "somepasswordvalues".getBytes();
+        byte[] passwd = "somepasswordvalues".getBytes();
         String[] expectedPHCs = {
             "$argon2id$v=19$m=65536,t=1,p=4$MDkwOTA5MDkwOTA5$4UOEHDZiPmXffE2xQjfvCugdzPNOfHhw/Lz8sDj8uY0",
             "$argon2id$v=19$m=65536,t=1,p=4$MDUwNTA1MDUwNTA1MDUwNQ$QGNATFLKRkNRzDx2x48tZ3ImZHPhqMJIOItXzHmzHvA",
@@ -200,7 +200,7 @@ public class TestArgon2KAT {
             "$argon2id$v=19$m=66560,t=3,p=3$MDUwNTA1MDUwNTA1MDUwNTAxMDEwMTAxMDEwMTAxMDE$lABKLpy9mARU8P5gKIh0eWwBjCB7yq1NRPufJEiow/g"
         };
         for (String e : expectedPHCs) {
-            runPHC(e, msg);
+            runPHC(e, passwd);
         }
     }
 

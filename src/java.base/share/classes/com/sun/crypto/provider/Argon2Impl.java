@@ -307,15 +307,15 @@ public final class Argon2Impl {
             for (int i = startingIdx; i < this.segLen; i++, currOfs++) {
                 int prevOfs = (currOfs == 0 ?  this.columns - 1 : currOfs - 1);
 
-                // computing the index of the reference block
-                // Taking pseudo-random value from the previous block
                 if (independentAddr) {
+                    // computing the index of the reference block
                     if (i % ARGON2_ADDRESSES_IN_BLOCK == 0) {
                         addressBlock = nextAddresses(inBlock);
                     }
                     pseudoRand = addressBlock.value[i %
                             ARGON2_ADDRESSES_IN_BLOCK];
                 } else {
+                    // Taking pseudo-random value from the previous block
                     pseudoRand = b[pos.lane][prevOfs].value[0];
                 }
 
@@ -434,6 +434,7 @@ public final class Argon2Impl {
         Runtime r = Runtime.getRuntime();
         // memory limit = 1/4 of maximum amount of the jvm memory limit
         MEMORY_MAX = r.maxMemory() >>> 12;
+
         // parallelism limit = 16 * number of cores
         P_MAX = r.availableProcessors() << 4;
     }
@@ -575,16 +576,16 @@ public final class Argon2Impl {
                     ("Unsupported version, SunJCE only supports V13, but got " +
                     spec.version());
         }
-        int memory = checkMax(spec.memory(), MEMORY_MAX,
+        int memory = checkMax(spec.memoryKiB(), MEMORY_MAX,
                 "Memory size %d exceeds SunJCE's maximum %d");
         int parallelism = checkMax(spec.parallelism(), P_MAX,
                 "Parallelism value %d exceeds SunJCE's maximum %d");
         int tagLen = spec.tagLen();
         int iterations = spec.iterations();
-        byte[] msg = spec.msg();
-        byte[] nonce = spec.nonce();
+        byte[] msg = spec.password();
+        byte[] nonce = spec.salt();
         byte[] secret = spec.secret();
-        byte[] ad = spec.ad();
+        byte[] ad = spec.associatedData();
 
         byte[] h0Plus8Bytes = null;
         try {

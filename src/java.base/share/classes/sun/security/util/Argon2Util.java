@@ -105,7 +105,7 @@ public final class Argon2Util {
                             ("data length should not exceed 32: " +
                             value.length);
                 }
-                builder.ad(value);
+                builder.associatedData(value);
                 break;
             } else {
                 throw new IllegalArgumentException
@@ -127,19 +127,19 @@ public final class Argon2Util {
     // com.sun.crypto.provider.Argon2DerivedKey
     public static String encodeHash(String algo, Argon2ParameterSpec spec,
             byte[] tag) {
-        String params = encodeParams(spec.memory(), spec.iterations(),
-                spec.parallelism(), spec.secret(), spec.ad());
+        String params = encodeParams(spec.memoryKiB(), spec.iterations(),
+                spec.parallelism(), spec.secret(), spec.associatedData());
         if (tag != null) {
             return String.format("$%s$v=%d$%s$%s$%s",
                 algo.toLowerCase(Locale.ENGLISH),
                 spec.version().value(), params,
-                enc.encodeToString(spec.nonce()),
+                enc.encodeToString(spec.salt()),
                 enc.encodeToString(tag));
         } else { // special case for Argon2ParameterSpec.toString()
             return String.format("$%s$v=%d$%s$%s",
                 algo.toLowerCase(Locale.ENGLISH),
                 spec.version().value(), params,
-                enc.encodeToString(spec.nonce()));
+                enc.encodeToString(spec.salt()));
         }
     }
 
