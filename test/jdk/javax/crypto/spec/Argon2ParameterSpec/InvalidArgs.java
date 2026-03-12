@@ -30,6 +30,7 @@
  */
 import jdk.test.lib.Utils;
 
+import java.nio.charset.StandardCharsets;
 import javax.crypto.spec.Argon2ParameterSpec;
 import static javax.crypto.spec.Argon2ParameterSpec.Builder;
 
@@ -40,9 +41,7 @@ public class InvalidArgs {
     public static void main(String[] args) throws Exception {
         Class iaeCls = IllegalArgumentException.class;
 
-        Builder b = Argon2ParameterSpec.newBuilder();
-        Utils.runAndCheckException(()->b.nonce(null), iaeCls);
-        Utils.runAndCheckException(()->b.nonce(B0), iaeCls);
+        final Builder b = Argon2ParameterSpec.newBuilder();
         Utils.runAndCheckException(()->b.parallelism(-1), iaeCls);
         Utils.runAndCheckException(()->b.parallelism(0), iaeCls);
         Utils.runAndCheckException(()->b.parallelism(2).memoryKiB(12), iaeCls);
@@ -61,11 +60,24 @@ public class InvalidArgs {
         Utils.runAndCheckException(()->b.secret(null), iaeCls);
         Utils.runAndCheckException(()->b.ad(null), iaeCls);
 
-        byte[] b8 = new byte[8];
-        Builder b2 = Argon2ParameterSpec.newBuilder().nonce(b8)
-               .parallelism(2).memoryKiB(32).tagLen(8).iterations(5);
-        Utils.runAndCheckException(()->b2.build(null), iaeCls);
-        System.out.println(b2.build("12345678".getBytes()));
+        final byte[] b8 = "12345678".getBytes();
+        final char[] c0 = new char[0];
+        // setup the builder w/ the required parameters
+        b.parallelism(2).memoryKiB(32).tagLen(8).iterations(5);
+
+        Utils.runAndCheckException(()->b.build(null, b8), iaeCls);
+        Utils.runAndCheckException(()->b.build(B0, b8), iaeCls);
+        Utils.runAndCheckException(()->b.build(b8, null), iaeCls);
+        Utils.runAndCheckException(()->b.build(null, c0,
+                StandardCharsets.UTF_8), iaeCls);
+        Utils.runAndCheckException(()->b.build(B0, c0, StandardCharsets.UTF_8),
+                iaeCls);
+        Utils.runAndCheckException(()->b.build(b8, null,
+                StandardCharsets.UTF_8), iaeCls);
+        Utils.runAndCheckException(()->b.build(b8, c0, null), iaeCls);
+
+        System.out.println(b.build(b8, b8));
+        System.out.println(b.build(b8, c0, StandardCharsets.UTF_8));
 
         System.out.println("Test Passed");
     }

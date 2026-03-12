@@ -38,8 +38,8 @@ import sun.security.util.PBEUtil;
  * <a href="http://tools.ietf.org/html/rfc9106">RFC 9106</a>.
  *
  * <p> The parameters consist of {@code version}, {@code nonce},
- * {@code parallelism}, {@code tagLen}, {@code memory}, {@code iterations} and
- * optional {@code secret} and {@code ad} bytes.
+ * {@code parallelism}, {@code tagLen}, {@code memory}, {@code iterations},
+ * {@code msg} and the optional {@code secret} and {@code ad} bytes.
  *
  * <p> This class can be used to initialize a {@code KDF} object that
  * implements the <i>Argon2</i> family of algorithms, i.e. <code>Argon2i</code>,
@@ -112,7 +112,6 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
         private static int TAGLEN_MIN = 4;
 
         private Version ver = Version.V13; // defaults to the official version
-        private byte[] nonce;
         private int p;
         private int tagLen;
         private int memory;
@@ -175,19 +174,6 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
         public Builder version(Version ver) throws IllegalArgumentException {
             checkNonNull(ver, "version");
             this.ver = ver;
-            return this;
-        }
-
-        /**
-         * Set nonce value to the builder.
-         *
-         * @param n nonce value
-         * @return this builder
-         * @throws IllegalArgumentException if {@code n} is invalid, e.g.
-         *         {@code null}, or less than 8-byte
-         */
-        public Builder nonce(byte[] n) throws IllegalArgumentException {
-            this.nonce = checkBytes(n, NONCE_LEN_MIN, "nonce").clone();
             return this;
         }
 
@@ -295,41 +281,48 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
         }
 
         /**
-         * Use the specified {@code msg} and the supplied parameters to
-         * create an Argon2ParameterSpec object.
+         * Use the specified {@code nonce}, {@code msg} and the supplied
+         * parameters to create an Argon2ParameterSpec object.
          *
+         * @param nonce the nonce value which is a salt for password hashing
+         *         applications
          * @param msg the message bytes which is the password for password
          *         hashing applications
          * @return an {@code Argon2ParameterSpec} object
-         * @throws IllegalArgumentException if the {@code msg} is {@code null}
-         *         or the parameters is invalid.
+         * @throws IllegalArgumentException if {@code nounce} is invalid, e.g.
+         *         {@code null}, or less than 8-byte, the {@code msg}
+         *         is {@code null}, or missing the required parameters.
          */
-        public Argon2ParameterSpec build(byte[] msg) {
+        public Argon2ParameterSpec build(byte[] nonce, byte[] msg) {
+            checkBytes(nonce, NONCE_LEN_MIN, "nonce");
             checkNonNull(msg, "message");
             // validate the other parameters to make sure they are all set
-            checkBytes(this.nonce, NONCE_LEN_MIN, "nonce");
             checkInteger(this.p, 1, -1, "parallelism");
             checkInteger(this.tagLen, TAGLEN_MIN, -1, "tag length");
             checkInteger(this.memory, p << 3, -1, "memory");
             checkInteger(this.t, 1, -1, "iterations");
-            return new Argon2ParameterSpec(this, msg);
+            return new Argon2ParameterSpec(this, nonce, msg);
         }
 
         /**
-         * Use the specified {@code msgChar} and the supplied parameters to
-         * create an Argon2ParameterSpec object. The {@code msgChar} is
-         * converted to {@code byte[]} based on the {@code cs}.
+         * Convert {@code msgChar} to {@code byte[]} based on the {@code cs}.
+         * Then use it with the specified {@code nonce} to create an
+         * Argon2ParameterSpec object.
          *
+         * @param nonce the nonce value which is a salt for password hashing
+         *         applications
          * @param msgChar the message characters
          * @param cs the charset to encode the {@code msgChar} into bytes
          * @return an {@code Argon2ParameterSpec} object
-         * @throws IllegalArgumentException if the {@code passwdChar},
-         *         {@code cs}, or any of the parameters is invalid.
+         * @throws IllegalArgumentException if the {@code nounce} is invalid,
+         *         e.g. {@code null}, or less than 8-byte, {@code msgChar} is
+         *         null, {@code cs} is null, or missing the required parameters.
          */
-        public Argon2ParameterSpec build(char[] msgChar, Charset cs) {
+        public Argon2ParameterSpec build(byte[] nonce, char[] msgChar,
+                Charset cs) {
             checkNonNull(msgChar, "message char[]");
             checkNonNull(cs, "charset");
-            return build(PBEUtil.encodePassword(msgChar, cs));
+            return build(nonce, PBEUtil.encodePassword(msgChar, cs));
         }
     };
 
@@ -378,11 +371,11 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
      * @param passwd the password bytes for password hashing ; MUST have a length
      *        not greater than 2^(32)-1 bytes.
      */
-    private Argon2ParameterSpec(Builder builder, byte[] msg) {
+    private Argon2ParameterSpec(Builder builder, byte[] nonce, byte[] msg) {
         // values are already validated by Builder
         this.ver = builder.ver;
         this.msg = msg.clone();
-        this.nonce = builder.nonce.clone();
+        this.nonce = nonce.clone();
         this.p = builder.p;
         this.tagLen = builder.tagLen;
         this.memory = builder.memory;

@@ -51,7 +51,7 @@ public class TestArgon2EncodedHash {
         }
 
         public Argon2ParameterSpec getParameters() {
-            return info.builder().build(msg);
+            return info.builder().build(info.salt(), msg);
         }
     }
 

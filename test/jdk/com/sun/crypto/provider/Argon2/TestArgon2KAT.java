@@ -51,16 +51,15 @@ public class TestArgon2KAT {
     private static Argon2ParameterSpec genParams(byte[] msg,
             byte[] salt, int parallelism, int memory, int iteration,
             byte[] secret, byte[] ad, int tagLen) {
-        Builder b = Argon2ParameterSpec.newBuilder().nonce(salt)
-                .parallelism(parallelism).memoryKiB(memory)
-                .iterations(iteration).tagLen(tagLen);
+        Builder b = Argon2ParameterSpec.newBuilder().parallelism(parallelism)
+                .memoryKiB(memory).iterations(iteration).tagLen(tagLen);
         if (secret != null && secret.length > 0) {
             b = b.secret(secret);
         }
         if (ad != null && ad.length > 0) {
             b = b.ad(ad);
         }
-        return b.build(msg);
+        return b.build(salt, msg);
     }
 
     private static void checkOutputs(String expectedHex, byte[]... res) {
@@ -110,7 +109,7 @@ public class TestArgon2KAT {
         if (!algo.equals("ARGON2ID")) {
             throw new RuntimeException("Only supports Argon2id: " + algo);
         }
-        Argon2ParameterSpec spec = info.builder().build(msg);
+        Argon2ParameterSpec spec = info.builder().build(info.salt(), msg);
         byte[] out = KDF.getInstance(algo).deriveData(spec);
         String actual = Argon2Util.encodeHash(algo, spec, out);
         if (!actual.equalsIgnoreCase(expected)) {

@@ -119,7 +119,8 @@ public final class Argon2Util {
     }
 
     // Used by Argon2 regression tests which uses PHC string input
-    public record Argon2Info(String algo, Argon2ParameterSpec.Builder builder) {
+    public record Argon2Info(String algo, byte[] salt,
+            Argon2ParameterSpec.Builder builder) {
     }
 
     // Used by both javax.crypto.spec.Argon2ParameterSpec and
@@ -158,6 +159,7 @@ public final class Argon2Util {
 
         // parse type
         String algo = values[1];
+        byte[] salt = null;
         Argon2ParameterSpec.Builder builder = Argon2ParameterSpec.newBuilder();
         int idx = 1;
         while (++idx < values.length) {
@@ -170,13 +172,12 @@ public final class Argon2Util {
                     decodeAndSetParams(values[3], builder);
                 }
                 case 4 -> {
-                    byte[] salt = dec.decode(values[4]);
+                    salt = dec.decode(values[4]);
                     if (salt.length < 8 || salt.length > 48) {
                         throw new IllegalArgumentException
                                 ("salt length should be between 8 to 48 bytes: "
                                 + salt.length);
                     }
-                    builder.nonce(salt);
                 }
                 case 5 -> {
                     // use the trailing hash to decide tagLen
@@ -194,6 +195,6 @@ public final class Argon2Util {
                 }
             }
         }
-        return new Argon2Info(algo, builder);
+        return new Argon2Info(algo, salt, builder);
     }
 }
