@@ -58,6 +58,7 @@ public final class Argon2DerivedKey implements SecretKey {
     /**
      * Create a Argon2 derived secret key using the supplied arguments.
      *
+     * @param type the Argon2 variant.
      * @param spec the Argon2 parameters used.
      * @param key the derived key bytes.
      * @param algo the algorithm for the derived key.

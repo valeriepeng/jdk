@@ -44,6 +44,29 @@ import static sun.security.provider.ByteArrayAccess.*;
  */
 public final class Argon2Impl {
 
+    static final int ARGON2_SLICE_NUM = 4;
+    static final int ARGON2_BLOCK_SIZE = 1024;
+    static final int ARGON2_QWORDS_IN_BLOCK = 128; // QWORD=8-byte
+    static final int ARGON2_ADDRESSES_IN_BLOCK = 128;
+    // Pre-hashing digest length and its extension
+    static final int ARGON2_PREHASH_DIGEST_LENGTH = 64;
+    static final int ARGON2_PREHASH_SEED_LENGTH   = 72;
+
+    // implementation limits to deter DOS
+    private static final long MEMORY_MAX;
+    private static final int P_MAX;
+    static {
+        Runtime r = Runtime.getRuntime();
+        long memLimit = r.maxMemory();
+        if (memLimit == Long.MAX_VALUE) {
+            MEMORY_MAX = 1 << 21; // 2 GiB?
+        } else {
+            MEMORY_MAX = memLimit >>> 12; // 1/4 of maximum jvm memory
+        }
+        // PHC range: 1 - 255
+        P_MAX = r.availableProcessors() * 16;
+    }
+
     /**
      * Type of Argon2 algorithms
      */
@@ -75,7 +98,295 @@ public final class Argon2Impl {
         }
     };
 
+    private final Type type;
+
+    public Argon2Impl(String algoUpper) {
+        this.type = Type.valueOf(algoUpper);
+    }
+
+    public byte[] derive(Argon2ParameterSpec spec)
+            throws InvalidAlgorithmParameterException {
+        if (spec.version() != Version.V13) {
+            throw new InvalidAlgorithmParameterException
+                    ("Unsupported version, SunJCE only supports V13, but got " +
+                    spec.version());
+        }
+        int memory = checkMax(spec.memoryKiB(), MEMORY_MAX,
+                "Memory size %d exceeds SunJCE's maximum %d");
+        int parallelism = checkMax(spec.parallelism(), P_MAX,
+                "Parallelism value %d exceeds SunJCE's maximum %d");
+        int tagLen = spec.tagLen();
+        int iterations = spec.iterations();
+        byte[] msg = spec.password();
+        byte[] nonce = spec.salt();
+        byte[] secret = spec.secret();
+        byte[] ad = spec.associatedData();
+
+        byte[] h0Plus8Bytes = null;
+        try {
+            // 1) Establish initial hash H_0
+            // Allocate 72 bytes for storing initialHash(h0) since H_0 is
+            // appended w/ additional 8 bytes for generating the first 2
+            // blocks in fillFirstTwoColumns(...).
+            h0Plus8Bytes = initialHash(parallelism, tagLen, memory,
+                iterations, Version.V13, type, msg, nonce, secret, ad);
+
+            // 2) Allocate memory m' - stored inside Argon2Instance
+            Argon2Instance instance = new Argon2Instance(type, parallelism,
+                    memory, iterations);
+            instance.fillFirstTwoColumns(h0Plus8Bytes);
+            instance.fillMemoryBlocks();
+            return instance.getFinalTag(tagLen);
+        } finally {
+            // erase initial hash
+            Arrays.fill(h0Plus8Bytes, (byte)0);
+        }
+    }
+
+    private static int checkMax(int value, long max, String errMsg)
+            throws InvalidAlgorithmParameterException {
+        if (value > max) {
+            throw new InvalidAlgorithmParameterException(String.format(errMsg,
+                    value, max));
+        }
+        return value;
+    }
+
+    private static byte[] initialHash(int parallelism, int tagLen, int memory,
+            int iterations, Version v, Type type, byte[] msg, byte[] nonce,
+            byte[] secret, byte[] ad) {
+        // 1) Initial hashing
+        // Hashing all inputs to generate the initialHash (H_0, 64-byte)
+        // Allocate 72 bytes for storing initialHash(h0) since H_0 is
+        // appended w/ additional 8 bytes for generating the first 2
+        // blocks in step 3.
+        byte[] h0Plus8Bytes = new byte[ARGON2_PREHASH_SEED_LENGTH];
+
+        Blake2b bl = new Blake2b(ARGON2_PREHASH_DIGEST_LENGTH);
+        byte[] in = new byte[24];
+        i2bLittle4(parallelism, in, 0);
+        i2bLittle4(tagLen, in, 4);
+        i2bLittle4(memory, in, 8);
+        i2bLittle4(iterations, in, 12);
+        i2bLittle4(v.value(), in, 16);
+        i2bLittle4(type.value(), in, 20);
+        bl.update(in);
+        byte[][] byteArrays = { msg, nonce, secret, ad };
+        for (byte[] b : byteArrays) {
+            int len = (b == null ? 0 : b.length);
+            i2bLittle4(len, in, 0);
+            bl.update(in, 0, 4);
+            if (len > 0) {
+                bl.update(b, 0, len);
+            }
+        }
+        bl.doFinal(h0Plus8Bytes, 0);
+        return h0Plus8Bytes;
+    }
+
     private static final class Argon2Instance {
+
+        private static final long INT_MASK = 0x0FFFFFFFFL;
+
+        private final Type type;
+        private final int lanes;
+        private final int passes;
+        private final int segLen;
+        private final int columns;
+        private final int blockNum;
+        private final Block[][] b;
+
+        Argon2Instance(Type type, int parallelism, int memory, int passes) {
+            this.type = type;
+            this.lanes = parallelism;
+            this.segLen = memory / (parallelism * 4);
+            this.columns = segLen * 4;
+            this.blockNum = this.columns * this.lanes;
+            this.passes = passes;
+            this.b = new Block[this.lanes][this.columns];
+        }
+
+        void fillFirstTwoColumns(byte[] h0Plus8Bytes) {
+            // 3) Compute B[i][0] for i = [0...p-1]
+            // B[i][0] = hash^(1024)(H_0 || LE32(0) || LE32(i))
+            // no need to set LE32(0) as that should be the value
+            for (int k = 0; k < lanes; k++) {
+                i2bLittle4(k, h0Plus8Bytes, 68);
+                b[k][0] = new Block(vlHash(ARGON2_BLOCK_SIZE,
+                        h0Plus8Bytes));
+            }
+
+            // 4) Compute B[i][1] for i = [0...p-1]
+            // B[i][1] = hash^(1024)(H_0 || LE32(1) || LE32(i))
+            i2bLittle4(1, h0Plus8Bytes, ARGON2_PREHASH_DIGEST_LENGTH);
+            for (int k = 0; k < lanes; k++) {
+                i2bLittle4(k, h0Plus8Bytes, 68);
+                b[k][1] = new Block(vlHash(ARGON2_BLOCK_SIZE,
+                        h0Plus8Bytes));
+            }
+        }
+
+        void fillMemoryBlocks() {
+            try {
+                ExecutorService workers = Executors.newFixedThreadPool(lanes);
+
+                // 5), 6) Compute B[i][j] for number of passes
+                for (int r = 0; r < passes; r++) {
+                    for (int s = 0; s < ARGON2_SLICE_NUM; s++) {
+                        CountDownLatch latch = new CountDownLatch(lanes);
+                        for (int k = 0; k < lanes; k++) {
+                            Argon2Position pos =  new Argon2Position(r, k, s);
+                            workers.submit(() -> {
+                                this.fillSegment(pos);
+                                latch.countDown();
+                            });
+                        }
+                        latch.await();
+                    }
+                }
+                workers.shutdown();
+                if (!workers.awaitTermination(2, TimeUnit.SECONDS)) {
+                    workers.shutdownNow();
+                }
+            } catch (InterruptedException ie) {
+                throw new ProviderException("Interrupted", ie);
+            }
+        }
+
+        private void fillSegment(Argon2Position pos) {
+            Block inBlock = null;
+            boolean independentAddr =
+                (type == Type.ARGON2ID && (pos.pass == 0) && (pos.slice < 2)
+                || type == Type.ARGON2I);
+            if (independentAddr) {
+                inBlock = new Block();
+                inBlock.value[0] = pos.pass;
+                inBlock.value[1] = pos.lane;
+                inBlock.value[2] = pos.slice;
+                inBlock.value[3] = this.blockNum;
+                inBlock.value[4] = this.passes;
+                inBlock.value[5] = this.type.value();
+            }
+            int startingIdx = 0;
+            Block addressBlock = null;
+
+            if (pos.pass == 0 && pos.slice == 0) {
+                // adjust startingIdx as the first two blocks are generated
+                // in fillFirstTwoColumns() already
+                startingIdx = 2;
+                if (independentAddr) {
+                    addressBlock = nextAddresses(inBlock);
+                }
+            }
+            int currOfs = pos.slice * this.segLen + startingIdx;
+
+            long pseudoRand;
+            for (int i = startingIdx; i < this.segLen; i++, currOfs++) {
+                int prevOfs = (currOfs == 0 ?  this.columns - 1 : currOfs - 1);
+
+                if (independentAddr) {
+                    // computing the index of the reference block
+                    if (i % ARGON2_ADDRESSES_IN_BLOCK == 0) {
+                        addressBlock = nextAddresses(inBlock);
+                    }
+                    pseudoRand = addressBlock.value[i %
+                            ARGON2_ADDRESSES_IN_BLOCK];
+                } else {
+                    // Taking pseudo-random value from the previous block
+                    pseudoRand = b[pos.lane][prevOfs].value[0];
+                }
+
+                int refLane = (pos.pass == 0) && (pos.slice == 0) ?
+                        // can't reference other lanes yet
+                        pos.lane :
+                        (int) ((pseudoRand >>> 32) % this.lanes);
+
+                // Computing the number of possible reference block within
+                // the lane
+                pos.index = i;
+                int refIndex = indexAlpha(pos, pseudoRand & INT_MASK,
+                        refLane == pos.lane);
+
+                // Creating a new block
+                Block prevBlock = b[pos.lane][prevOfs];
+                Block refBlock = b[refLane][refIndex];
+                if (pos.pass == 0) {
+                    Block currBlock = new Block();
+                    // first pass, no xor
+                    compressG(prevBlock, refBlock, currBlock, false);
+                    b[pos.lane][currOfs] = currBlock;
+                } else {
+                    Block currBlock = b[pos.lane][currOfs];
+                    compressG(prevBlock, refBlock, currBlock, true);
+                }
+            }
+        }
+
+        // calculate and returns the absolute column index z
+        private int indexAlpha(Argon2Position pos, long j1, boolean sameLane) {
+            /*
+             * Pass 0:
+             *      Same lane   : all already finished segments plus already
+             * constructed blocks in this segment
+             *      Other lanes : all already finished segments
+             * Pass 1+:
+             *      Same lane   : last 3 segments plus already constructed
+             * blocks in this segment
+             *      Other lanes : last 3 segments
+             */
+            int wSize = 0;
+
+            if (pos.pass == 0 && pos.slice == 0) {
+                // first slice; all blocks in current segment but the previous
+                wSize = pos.index - 1;
+            } else {
+                wSize = (pos.pass == 0 ? pos.slice * this.segLen :
+                         this.columns - this.segLen);
+                if (sameLane) {
+                    // add blocks in current segment but the previous
+                    wSize += (pos.index - 1);
+                } else {
+                    wSize += (pos.index == 0 ? -1 : 0);
+                }
+            }
+
+            long x = j1*j1 >>> 32;
+            int y = (int) (x * wSize >>> 32);
+            int zz = wSize - 1 - y;
+
+            int startPosition = 0;
+            if (pos.pass != 0 && pos.slice != 3) {
+                // starts from the next segment if sliceNum = 0, 1, 2
+                startPosition = (pos.slice + 1) * this.segLen;
+            }
+            int z = (startPosition + zz) % this.columns;
+            return z;
+        }
+
+        byte[] getFinalTag(int outLen) {
+            // 7) Compute the final block C, i.e. xor of the last column
+            Block c = b[0][this.columns - 1];
+            byte[] cBytes = null;
+            try {
+                // xor the remaining blocks of the same column
+                for (int i = 1; i < this.lanes; i++) {
+                    c.xor(b[i][this.columns - 1]);
+                }
+                cBytes = c.getBytes();
+
+                // 8) Compute the output tag
+                return vlHash(outLen, cBytes);
+            } finally {
+                // erase all involved block here
+                if (cBytes != null) {
+                    Arrays.fill(cBytes, (byte) 0);
+                }
+                for (int i = 0; i < this.lanes; i++) {
+                    b[i][this.columns - 1].erase();
+                }
+            }
+        }
+
         // Variable-length hash function H' built upon Blake2b as defined in
         // RFC 9106 sec 3.3
         private static byte[] vlHash(int outLen, byte[] in) {
@@ -111,8 +422,6 @@ public final class Argon2Impl {
             }
             return out;
         }
-
-        private static final long INT_MASK = 0x0FFFFFFFFL;
 
         // Modified Blake MixG function as defined in RFC 9106 figure 19.
         private static void mixGB(long[] v, int a, int b, int c, int d) {
@@ -189,211 +498,12 @@ public final class Argon2Impl {
             Block.xor(dst, tmp, blockR);
         }
 
-        static Block nextAddresses(Block inBlock) {
+        private static Block nextAddresses(Block inBlock) {
             Block addressBlock = new Block();
             inBlock.value[6]++;
             compressG(Block.ZERO_BLK, inBlock, addressBlock, false);
             compressG(Block.ZERO_BLK, addressBlock, addressBlock, false);
             return addressBlock;
-        }
-
-        private final Type type;
-        private final int lanes;
-        private final int passes;
-        private final int segLen;
-        private final int columns;
-        private final int mem2;
-        private final Block[][] b;
-
-        Argon2Instance(Type type, int parallelism, int memory, int passes) {
-            this.type = type;
-            this.lanes = parallelism;
-            this.segLen = memory / (parallelism << 2);
-            this.columns = segLen << 2;
-            this.mem2 = (parallelism << 2) * segLen;
-            this.passes = passes;
-            this.b = new Block[this.lanes][this.columns];
-        }
-
-        void fillFirstTwoColumns(byte[] h0Plus8Bytes) {
-            // 3) Compute B[i][0] for i = [0...p-1]
-            // B[i][0] = hash^(1024)(H_0 || LE32(0) || LE32(i))
-            // no need to set LE32(0) as that should be the value
-            for (int k = 0; k < lanes; k++) {
-                i2bLittle4(k, h0Plus8Bytes, 68);
-                b[k][0] = new Block(vlHash(ARGON2_BLOCK_SIZE,
-                        h0Plus8Bytes));
-            }
-
-            // 4) Compute B[i][1] for i = [0...p-1]
-            // B[i][1] = hash^(1024)(H_0 || LE32(1) || LE32(i))
-            i2bLittle4(1, h0Plus8Bytes, ARGON2_PREHASH_DIGEST_LENGTH);
-            for (int k = 0; k < lanes; k++) {
-                i2bLittle4(k, h0Plus8Bytes, 68);
-                b[k][1] = new Block(vlHash(ARGON2_BLOCK_SIZE,
-                        h0Plus8Bytes));
-            }
-        }
-
-        // calculate and returns the absolute column index z
-        private int indexAlpha(Argon2Position pos, long j1, boolean sameLane) {
-            /*
-             * Pass 0:
-             *      Same lane   : all already finished segments plus already
-             * constructed blocks in this segment
-             *      Other lanes : all already finished segments
-             * Pass 1+:
-             *      Same lane   : last 3 segments plus already constructed
-             * blocks in this segment
-             *      Other lanes : last 3 segments
-             */
-            int wSize = 0;
-
-            if (pos.pass == 0 && pos.slice == 0) {
-                // first slice; all blocks in current segment but the previous
-                wSize = pos.index - 1;
-            } else {
-                wSize = (pos.pass == 0 ? pos.slice * this.segLen :
-                         this.columns - this.segLen);
-                if (sameLane) {
-                    // add blocks in current segment but the previous
-                    wSize += (pos.index - 1);
-                } else {
-                    wSize += (pos.index == 0 ? -1 : 0);
-                }
-            }
-
-            long x = j1*j1 >>> 32;
-            int y = (int) (x * wSize >>> 32);
-            int zz = wSize - 1 - y;
-
-            int startPosition = 0;
-            if (pos.pass != 0 && pos.slice != 3) {
-                // starts from the next segment if sliceNum = 0, 1, 2
-                startPosition = (pos.slice + 1) * this.segLen;
-            }
-            int z = (startPosition + zz) % this.columns;
-            return z;
-        }
-
-        private void fillSegment(Argon2Position pos) {
-            Block inBlock = null;
-            boolean independentAddr =
-                (type == Type.ARGON2ID && (pos.pass == 0) && (pos.slice < 2)
-                || type == Type.ARGON2I);
-            if (independentAddr) {
-                inBlock = new Block();
-                inBlock.value[0] = pos.pass;
-                inBlock.value[1] = pos.lane;
-                inBlock.value[2] = pos.slice;
-                inBlock.value[3] = this.mem2;
-                inBlock.value[4] = this.passes;
-                inBlock.value[5] = this.type.value();
-            }
-            int startingIdx = 0;
-            Block addressBlock = null;
-
-            if (pos.pass == 0 && pos.slice == 0) {
-                // adjust startingIdx as the first two blocks are generated
-                // in fillFirstTwoColumns() already
-                startingIdx = 2;
-                if (independentAddr) {
-                    addressBlock = nextAddresses(inBlock);
-                }
-            }
-            int currOfs = pos.slice * this.segLen + startingIdx;
-
-            long pseudoRand;
-            for (int i = startingIdx; i < this.segLen; i++, currOfs++) {
-                int prevOfs = (currOfs == 0 ?  this.columns - 1 : currOfs - 1);
-
-                if (independentAddr) {
-                    // computing the index of the reference block
-                    if (i % ARGON2_ADDRESSES_IN_BLOCK == 0) {
-                        addressBlock = nextAddresses(inBlock);
-                    }
-                    pseudoRand = addressBlock.value[i %
-                            ARGON2_ADDRESSES_IN_BLOCK];
-                } else {
-                    // Taking pseudo-random value from the previous block
-                    pseudoRand = b[pos.lane][prevOfs].value[0];
-                }
-
-                int refLane = (pos.pass == 0) && (pos.slice == 0) ?
-                        // can't reference other lanes yet
-                        pos.lane :
-                        (int) ((pseudoRand >>> 32) % this.lanes);
-
-                // Computing the number of possible reference block within
-                // the lane
-                pos.index = i;
-                int refIndex = indexAlpha(pos, pseudoRand & INT_MASK,
-                        refLane == pos.lane);
-
-                // Creating a new block
-                Block prevBlock = b[pos.lane][prevOfs];
-                Block refBlock = b[refLane][refIndex];
-                if (pos.pass == 0) {
-                    Block currBlock = new Block();
-                    // first pass, no xor
-                    compressG(prevBlock, refBlock, currBlock, false);
-                    b[pos.lane][currOfs] = currBlock;
-                } else {
-                    Block currBlock = b[pos.lane][currOfs];
-                    compressG(prevBlock, refBlock, currBlock, true);
-                }
-            }
-        }
-
-        void fillMemoryBlocks() {
-            try {
-                ExecutorService workers = Executors.newFixedThreadPool(lanes);
-
-                // 5), 6) Compute B[i][j] for number of passes
-                for (int r = 0; r < passes; r++) {
-                    for (int s = 0; s < ARGON2_SYNC_POINTS; s++) {
-                        CountDownLatch latch = new CountDownLatch(lanes);
-                        for (int k = 0; k < lanes; k++) {
-                            Argon2Position pos =  new Argon2Position(r, k, s);
-                            workers.submit(() -> {
-                                this.fillSegment(pos);
-                                latch.countDown();
-                            });
-                        }
-                        latch.await();
-                    }
-                }
-                workers.shutdown();
-                if (!workers.awaitTermination(2, TimeUnit.SECONDS)) {
-                    workers.shutdownNow();
-                }
-            } catch (InterruptedException ie) {
-                throw new ProviderException("Interrupted", ie);
-            }
-        }
-
-        byte[] getFinalTag(int outLen) {
-            // 7) Compute the final block C, i.e. xor of the last column
-            Block c = b[0][this.columns - 1];
-            byte[] cBytes = null;
-            try {
-                // xor the remaining blocks of the same column
-                for (int i = 1; i < this.lanes; i++) {
-                    c.xor(b[i][this.columns - 1]);
-                }
-                cBytes = c.getBytes();
-
-                // 8) Compute the output tag
-                return vlHash(outLen, cBytes);
-            } finally {
-                // erase all involved block here
-                if (cBytes != null) {
-                    Arrays.fill(cBytes, (byte) 0);
-                }
-                for (int i = 0; i < this.lanes; i++) {
-                    b[i][this.columns - 1].erase();
-                }
-            }
         }
     }
 
@@ -414,29 +524,6 @@ public final class Argon2Impl {
             return "pass = " + pass + ", lane = " + lane + ", slice = " +
                 slice + ", index = " + index;
         }
-    }
-
-    // constants
-    public static final int ARGON2_SYNC_POINTS = 4;
-    public static final int ARGON2_BLOCK_SIZE = 1024;
-    public static final int ARGON2_QWORDS_IN_BLOCK = 128; // QWORD=8-byte
-    /* Number of pseudo-random values generated by one call to Blake2b in
-       Argon2i to generate reference block positions */
-    public static final int ARGON2_ADDRESSES_IN_BLOCK = 128;
-    // Pre-hashing digest length and its extension
-    public static final int ARGON2_PREHASH_DIGEST_LENGTH = 64;
-    public static final int ARGON2_PREHASH_SEED_LENGTH   = 72;
-
-    // implementation limits to deter DOS
-    private static final long MEMORY_MAX;
-    private static final int P_MAX;
-    static {
-        Runtime r = Runtime.getRuntime();
-        // memory limit = 1/4 of maximum amount of the jvm memory limit
-        MEMORY_MAX = r.maxMemory() >>> 12;
-
-        // parallelism limit = 16 * number of cores
-        P_MAX = r.availableProcessors() << 4;
     }
 
     private static class Block {
@@ -476,20 +563,6 @@ public final class Argon2Impl {
             b2lLittle(bytes, 0, value, 0, ARGON2_BLOCK_SIZE);
         }
 
-        @Override
-        public Object clone() {
-            return new Block(value);
-        }
-
-        @Override
-        public String toString() {
-            String result = "";
-            for (int i = 0; i < value.length; i++) {
-                result += "[" + i + "]" + Long.toHexString(value[i]) + "\n";
-            }
-            return result;
-        }
-
         byte[] getBytes() {
             byte[] out = new byte[ARGON2_BLOCK_SIZE];
             l2bLittle(value, 0, out, 0, ARGON2_BLOCK_SIZE);
@@ -520,91 +593,19 @@ public final class Argon2Impl {
                 dst.value[i] = src1.value[i] ^ src2.value[i];
             }
         }
-    }
 
-    private final Type type;
+        @Override
+        public Object clone() {
+            return new Block(value);
+        }
 
-    private static byte[] initialHash(int parallelism, int tagLen, int memory,
-            int iterations, Version v, Type type, byte[] msg, byte[] nonce,
-            byte[] secret, byte[] ad) {
-        // 1) Initial hashing
-        // Hashing all inputs to generate the initialHash (H_0, 64-byte)
-        // Allocate 72 bytes for storing initialHash(h0) since H_0 is
-        // appended w/ additional 8 bytes for generating the first 2
-        // blocks in step 3.
-        byte[] h0Plus8Bytes = new byte[ARGON2_PREHASH_SEED_LENGTH];
-
-        Blake2b bl = new Blake2b(ARGON2_PREHASH_DIGEST_LENGTH);
-        byte[] in = new byte[24];
-        i2bLittle4(parallelism, in, 0);
-        i2bLittle4(tagLen, in, 4);
-        i2bLittle4(memory, in, 8);
-        i2bLittle4(iterations, in, 12);
-        i2bLittle4(v.value(), in, 16);
-        i2bLittle4(type.value(), in, 20);
-        bl.update(in);
-        byte[][] byteArrays = { msg, nonce, secret, ad };
-        for (byte[] b : byteArrays) {
-            int len = (b == null ? 0 : b.length);
-            i2bLittle4(len, in, 0);
-            bl.update(in, 0, 4);
-            if (len > 0) {
-                bl.update(b, 0, len);
+        @Override
+        public String toString() {
+            String result = "";
+            for (int i = 0; i < value.length; i++) {
+                result += "[" + i + "]" + Long.toHexString(value[i]) + "\n";
             }
-        }
-        bl.doFinal(h0Plus8Bytes, 0);
-        return h0Plus8Bytes;
-    }
-
-    public Argon2Impl(String algoUpper) {
-        this.type = Type.valueOf(algoUpper);
-    }
-
-    private static int checkMax(int value, long max, String errMsg)
-            throws InvalidAlgorithmParameterException {
-        if (value > max) {
-            throw new InvalidAlgorithmParameterException(String.format(errMsg,
-                    value, max));
-        }
-        return value;
-    }
-
-    public byte[] derive(Argon2ParameterSpec spec)
-            throws InvalidAlgorithmParameterException {
-        if (spec.version() != Version.V13) {
-            throw new InvalidAlgorithmParameterException
-                    ("Unsupported version, SunJCE only supports V13, but got " +
-                    spec.version());
-        }
-        int memory = checkMax(spec.memoryKiB(), MEMORY_MAX,
-                "Memory size %d exceeds SunJCE's maximum %d");
-        int parallelism = checkMax(spec.parallelism(), P_MAX,
-                "Parallelism value %d exceeds SunJCE's maximum %d");
-        int tagLen = spec.tagLen();
-        int iterations = spec.iterations();
-        byte[] msg = spec.password();
-        byte[] nonce = spec.salt();
-        byte[] secret = spec.secret();
-        byte[] ad = spec.associatedData();
-
-        byte[] h0Plus8Bytes = null;
-        try {
-            // 1) Establish initial hash H_0
-            // Allocate 72 bytes for storing initialHash(h0) since H_0 is
-            // appended w/ additional 8 bytes for generating the first 2
-            // blocks in fillFirstTwoColumns(...).
-            h0Plus8Bytes = initialHash(parallelism, tagLen, memory,
-                iterations, Version.V13, type, msg, nonce, secret, ad);
-
-            // 2) Allocate memory m' - stored inside Argon2Instance
-            Argon2Instance instance = new Argon2Instance(type, parallelism,
-                    memory, iterations);
-            instance.fillFirstTwoColumns(h0Plus8Bytes);
-            instance.fillMemoryBlocks();
-            return instance.getFinalTag(tagLen);
-        } finally {
-            // erase initial hash
-            Arrays.fill(h0Plus8Bytes, (byte)0);
+            return result;
         }
     }
 }

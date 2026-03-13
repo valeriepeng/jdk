@@ -181,7 +181,7 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
         /**
          * Set the memory value to the builder in power of two.
          *
-         * @param mPower set memory value to 2^{@code mc} Kibibytes
+         * @param mPower set memory value to 2^{@code mPower} Kibibytes
          * @return this builder
          * @throws IllegalArgumentException
          *         if {@code mPower} is less than 3 or larger than 30. Or if
@@ -458,8 +458,8 @@ public final class Argon2ParameterSpec implements AlgorithmParameterSpec,
     }
 
     /**
-     * Destroy this object by clearing out the {@code msg} and {@code secret}
-     * fields.
+     * Destroy this object by clearing out the {@code password} and
+     * {@code secret} fields.
      */
     @Override
     public void destroy() {
