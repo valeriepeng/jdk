@@ -161,7 +161,8 @@ public final class Argon2Util {
         while (++idx < values.length) {
             switch (idx) {
                 case 2 -> {
-                    Version ver = Version.get(values[2].split("=")[1]);
+                    Version ver = Version.of(Integer.parseInt
+                            (values[2].split("=")[1]));
                     builder.version(ver);
                 }
                 case 3 -> {

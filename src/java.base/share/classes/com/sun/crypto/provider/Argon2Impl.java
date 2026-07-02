@@ -127,15 +127,6 @@ public final class Argon2Impl {
         return instance.getFinalTag(tagLen);
     }
 
-    private static int checkMax(int value, long max, String errMsg)
-            throws InvalidAlgorithmParameterException {
-        if (value > max) {
-            throw new InvalidAlgorithmParameterException(String.format(errMsg,
-                    value, max));
-        }
-        return value;
-    }
-
     private static byte[] initialHash(int lanes, int tagLen, int memory,
             int iterations, Version v, Type type, byte[] msg, byte[] nonce,
             byte[] secret, byte[] ad) {
@@ -210,9 +201,10 @@ public final class Argon2Impl {
         }
 
         void fillMemoryBlocks() {
+            int poolSize = Math.min(lanes,
+                    Runtime.getRuntime().availableProcessors());
+            ExecutorService workers = Executors.newFixedThreadPool(poolSize);
             try {
-                ExecutorService workers = Executors.newFixedThreadPool(lanes);
-
                 // 5), 6) Compute B[i][j] for number of passes
                 for (int r = 0; r < passes; r++) {
                     for (int s = 0; s < ARGON2_SLICE_NUM; s++) {
@@ -220,8 +212,11 @@ public final class Argon2Impl {
                         for (int k = 0; k < lanes; k++) {
                             Argon2Position pos =  new Argon2Position(r, k, s);
                             workers.submit(() -> {
-                                this.fillSegment(pos);
-                                latch.countDown();
+                                try {
+                                    this.fillSegment(pos);
+                                } finally {
+                                    latch.countDown();
+                                }
                             });
                         }
                         latch.await();
